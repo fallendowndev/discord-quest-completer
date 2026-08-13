@@ -5,6 +5,7 @@ class QuestManager {
     constructor(client, quests = []) {
         this.quests = new Map();
         this.client = client;
+        this.activeTimers = [];
 
         quests.forEach((quest) => {
             this.quests.set(quest.id, quest);
@@ -214,15 +215,25 @@ class QuestManager {
     timeout(ms) {
         return new Promise(
             (resolve) => {
-                setTimeout(
+                const timerId = setTimeout(
                     resolve,
                     ms
                 );
+                this.activeTimers.push(timerId);
             }
         );
     }
 
+    clearAllTimers() {
+        this.activeTimers.forEach((timerId) => {
+            clearTimeout(timerId);
+        });
+        this.activeTimers = [];
+    }
+
     async doingQuest(quest) {
+        this.clearAllTimers();
+
         const questName =
             quest.config.messages
                 .quest_name;
@@ -370,7 +381,7 @@ class QuestManager {
         secondsDone
     ) {
         const maxFuture = 10;
-        const speed = 7;
+        const speed = 14;
         const progressInterval = 60;
 
         const enrolledAt =
@@ -382,86 +393,96 @@ class QuestManager {
         let completed = false;
         let lastProgressUpdate = 0;
 
-        while (true) {
-            const maxAllowed =
-                Math.floor(
-                    (Date.now() -
-                        enrolledAt) /
-                        1000
-                ) + maxFuture;
+        try {
+            while (true) {
+                const maxAllowed =
+                    Math.floor(
+                        (Date.now() -
+                            enrolledAt) /
+                            1000
+                    ) + maxFuture;
 
-            const diff =
-                maxAllowed - secondsDone;
+                const diff =
+                    maxAllowed - secondsDone;
 
-            const timestamp =
-                secondsDone + speed;
+                const timestamp =
+                    secondsDone + speed;
 
-            if (diff >= speed) {
-                const response =
-                    await this.client.rest.post(
-                        `/quests/${quest.id}/video-progress`,
-                        {
-                            body: {
-                                timestamp:
-                                    Math.min(
-                                        secondsNeeded,
-                                        timestamp +
-                                            Math.random()
-                                    )
+                if (diff >= speed) {
+                    const response =
+                        await this.client.rest.post(
+                            `/quests/${quest.id}/video-progress`,
+                            {
+                                body: {
+                                    timestamp:
+                                        Math.min(
+                                            secondsNeeded,
+                                            timestamp +
+                                                Math.random()
+                                        )
+                                }
                             }
-                        }
-                    );
+                        );
 
-                completed =
-                    response.completed_at != null;
+                    completed =
+                        response.completed_at != null;
 
-                secondsDone =
-                    Math.min(
-                        secondsNeeded,
-                        timestamp
-                    );
-            }
-
-            const currentTime = Date.now();
-            if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
-                const progress = Math.floor(secondsDone);
-                const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
-                const remainingMinutes = Math.ceil(remainingSeconds / 60);
-                
-                console.log(
-                    `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
-                );
-                
-                lastProgressUpdate = currentTime;
-            }
-
-            if (
-                timestamp >=
-                secondsNeeded
-            ) {
-                break;
-            }
-
-            await this.timeout(
-                speed * 1000
-            );
-        }
-
-        if (!completed) {
-            await this.client.rest.post(
-                `/quests/${quest.id}/video-progress`,
-                {
-                    body: {
-                        timestamp:
-                            secondsNeeded
-                    }
+                    secondsDone =
+                        Math.min(
+                            secondsNeeded,
+                            timestamp
+                        );
                 }
-            );
-        }
 
-        console.log(
-            `${questName} Completed!`
-        );
+                const currentTime = Date.now();
+                if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
+                    const progress = Math.floor(secondsDone);
+                    const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
+                    const remainingMinutes = Math.ceil(remainingSeconds / 60);
+                    
+                    console.log(
+                        `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
+                    );
+                    
+                    lastProgressUpdate = currentTime;
+                }
+
+                if (
+                    timestamp >=
+                    secondsNeeded
+                ) {
+                    break;
+                }
+
+                await this.timeout(
+                    speed * 1000
+                );
+            }
+
+            if (!completed) {
+                await this.client.rest.post(
+                    `/quests/${quest.id}/video-progress`,
+                    {
+                        body: {
+                            timestamp:
+                                secondsNeeded
+                        }
+                    }
+                );
+            }
+
+            console.log(
+                `${questName} Completed!`
+            );
+        } catch (error) {
+            console.error(
+                `Error during quest "${questName}":`,
+                error.message
+            );
+            throw error;
+        } finally {
+            this.clearAllTimers();
+        }
     }
 
     async doingPlayOnPlatformQuest(
@@ -474,12 +495,49 @@ class QuestManager {
         const progressInterval = 60;
         let lastProgressUpdate = 0;
 
-        while (!quest.isCompleted()) {
-            const secondsDone =
-                quest.userStatus
-                    ?.progress
-                    ?.[taskName]
-                    ?.value || 0;
+        try {
+            while (!quest.isCompleted()) {
+                const secondsDone =
+                    quest.userStatus
+                        ?.progress
+                        ?.[taskName]
+                        ?.value || 0;
+
+                const response =
+                    await this.client.rest.post(
+                        `/quests/${quest.id}/heartbeat`,
+                        {
+                            body: {
+                                application_id:
+                                    quest.config
+                                        .application
+                                        .id,
+                                terminal: false
+                            }
+                        }
+                    );
+
+                quest.updateUserStatus(
+                    response
+                );
+
+                const currentTime = Date.now();
+                if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
+                    const progress = Math.floor(secondsDone);
+                    const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
+                    const remainingMinutes = Math.ceil(remainingSeconds / 60);
+                    
+                    console.log(
+                        `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
+                    );
+                    
+                    lastProgressUpdate = currentTime;
+                }
+
+                await this.timeout(
+                    10 * 1000
+                );
+            }
 
             const response =
                 await this.client.rest.post(
@@ -490,7 +548,7 @@ class QuestManager {
                                 quest.config
                                     .application
                                     .id,
-                            terminal: false
+                            terminal: true
                         }
                     }
                 );
@@ -499,45 +557,18 @@ class QuestManager {
                 response
             );
 
-            const currentTime = Date.now();
-            if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
-                const progress = Math.floor(secondsDone);
-                const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
-                const remainingMinutes = Math.ceil(remainingSeconds / 60);
-                
-                console.log(
-                    `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
-                );
-                
-                lastProgressUpdate = currentTime;
-            }
-
-            await this.timeout(
-                20 * 1000
+            console.log(
+                `${questName} Completed!`
             );
+        } catch (error) {
+            console.error(
+                `Error during quest "${questName}":`,
+                error.message
+            );
+            throw error;
+        } finally {
+            this.clearAllTimers();
         }
-
-        const response =
-            await this.client.rest.post(
-                `/quests/${quest.id}/heartbeat`,
-                {
-                    body: {
-                        application_id:
-                            quest.config
-                                .application
-                                .id,
-                        terminal: true
-                    }
-                }
-            );
-
-        quest.updateUserStatus(
-            response
-        );
-
-        console.log(
-            `${questName} Completed!`
-        );
     }
 
     async doingPlayActivityQuest(
@@ -551,12 +582,47 @@ class QuestManager {
         const streamKey = 'call:1:1';
         let lastProgressUpdate = 0;
 
-        while (!quest.isCompleted()) {
-            const secondsDone =
-                quest.userStatus
-                    ?.progress
-                    ?.[taskName]
-                    ?.value || 0;
+        try {
+            while (!quest.isCompleted()) {
+                const secondsDone =
+                    quest.userStatus
+                        ?.progress
+                        ?.[taskName]
+                        ?.value || 0;
+
+                const response =
+                    await this.client.rest.post(
+                        `/quests/${quest.id}/heartbeat`,
+                        {
+                            body: {
+                                stream_key:
+                                    streamKey,
+                                terminal: false
+                            }
+                        }
+                    );
+
+                quest.updateUserStatus(
+                    response
+                );
+
+                const currentTime = Date.now();
+                if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
+                    const progress = Math.floor(secondsDone);
+                    const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
+                    const remainingMinutes = Math.ceil(remainingSeconds / 60);
+                    
+                    console.log(
+                        `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
+                    );
+                    
+                    lastProgressUpdate = currentTime;
+                }
+
+                await this.timeout(
+                    10 * 1000
+                );
+            }
 
             const response =
                 await this.client.rest.post(
@@ -565,7 +631,7 @@ class QuestManager {
                         body: {
                             stream_key:
                                 streamKey,
-                            terminal: false
+                            terminal: true
                         }
                     }
                 );
@@ -574,43 +640,18 @@ class QuestManager {
                 response
             );
 
-            const currentTime = Date.now();
-            if (currentTime - lastProgressUpdate >= progressInterval * 1000 || secondsDone >= secondsNeeded) {
-                const progress = Math.floor(secondsDone);
-                const remainingSeconds = Math.max(0, secondsNeeded - secondsDone);
-                const remainingMinutes = Math.ceil(remainingSeconds / 60);
-                
-                console.log(
-                    `Progress: ${progress}/${secondsNeeded} — ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`
-                );
-                
-                lastProgressUpdate = currentTime;
-            }
-
-            await this.timeout(
-                20 * 1000
+            console.log(
+                `${questName} Completed!`
             );
+        } catch (error) {
+            console.error(
+                `Error during quest "${questName}":`,
+                error.message
+            );
+            throw error;
+        } finally {
+            this.clearAllTimers();
         }
-
-        const response =
-            await this.client.rest.post(
-                `/quests/${quest.id}/heartbeat`,
-                {
-                    body: {
-                        stream_key:
-                            streamKey,
-                        terminal: true
-                    }
-                }
-            );
-
-        quest.updateUserStatus(
-            response
-        );
-
-        console.log(
-            `${questName} Completed!`
-        );
     }
 
     async doingAchievementInActivityQuest(
@@ -632,137 +673,147 @@ class QuestManager {
                 .ACHIEVEMENT_IN_ACTIVITY
                 .target;
 
-        const query =
-            new URLSearchParams({
-                response_type: 'code',
-                client_id: applicationId,
-                scope:
-                    'identify applications.commands applications.entitlements',
-                state: ''
-            });
+        try {
+            const query =
+                new URLSearchParams({
+                    response_type: 'code',
+                    client_id: applicationId,
+                    scope:
+                        'identify applications.commands applications.entitlements',
+                    state: ''
+                });
 
-        const response =
-            await this.client.rest.post(
-                '/oauth2/authorize',
-                {
-                    query,
-                    body: {
-                        permissions: '0',
-                        authorize: true,
-                        integration_type: 1,
-                        location_context: {
-                            guild_id: '10000',
-                            channel_id: '10000',
-                            channel_type: 10000
+            const response =
+                await this.client.rest.post(
+                    '/oauth2/authorize',
+                    {
+                        query,
+                        body: {
+                            permissions: '0',
+                            authorize: true,
+                            integration_type: 1,
+                            location_context: {
+                                guild_id: '10000',
+                                channel_id: '10000',
+                                channel_type: 10000
+                            }
                         }
                     }
-                }
-            );
-
-        console.log(
-            `Authorized application ${applicationName}`
-        );
-
-        const location =
-            response?.location;
-
-        let authCode = null;
-
-        if (location) {
-            authCode =
-                new URL(location)
-                    .searchParams
-                    .get('code');
-        }
-
-        if (!authCode) {
-            console.error(
-                `No auth code received for application ${applicationName}. Cannot complete the quest.`
-            );
-
-            return;
-        }
-
-        const {
-            token,
-            error: authError,
-            activityReferrer
-        } =
-            await Utils.authorizeDiscordSays(
-                applicationId,
-                quest.id,
-                authCode,
-                this.client
-            );
-
-        if (
-            authError ||
-            !token
-        ) {
-            console.error(
-                `Failed to authorize with Discord Says for application ${applicationName}. Cannot complete the quest.`,
-                authError
-            );
-
-            return;
-        }
-
-        const {
-            success,
-            error: progressError
-        } =
-            await Utils.progressDiscordSays(
-                applicationId,
-                quest.id,
-                token,
-                questTarget,
-                activityReferrer
-            );
-
-        if (
-            progressError ||
-            !success
-        ) {
-            console.error(
-                `Failed to progress quest with Discord Says for application ${applicationName}. Cannot complete the quest.`,
-                progressError
-            );
-
-            return;
-        }
-
-        const tokens =
-            await this.client.rest.get(
-                '/oauth2/tokens'
-            );
-
-        const tokenInfo =
-            tokens.find(
-                (token) =>
-                    token.application?.id ===
-                    applicationId
-            );
-
-        if (tokenInfo) {
-            try {
-                await this.client.rest.delete(
-                    `/oauth2/tokens/${tokenInfo.id}`
                 );
 
-                console.log(
-                    `Deauthorized application ${applicationName}`
-                );
-            } catch (err) {
-                console.error(
-                    `Failed to deauthorize token for application ${applicationName}.`,
-                    err.message
-                );
+            console.log(
+                `Authorized application ${applicationName}`
+            );
+
+            const location =
+                response?.location;
+
+            let authCode = null;
+
+            if (location) {
+                authCode =
+                    new URL(location)
+                        .searchParams
+                        .get('code');
             }
-        }
 
-        console.log(
-            `${questName} Completed!`
-        );
+            if (!authCode) {
+                console.error(
+                    `No auth code received for application ${applicationName}. Cannot complete the quest.`
+                );
+
+                return;
+            }
+
+            const {
+                token,
+                error: authError,
+                activityReferrer
+            } =
+                await Utils.authorizeDiscordSays(
+                    applicationId,
+                    quest.id,
+                    authCode,
+                    this.client
+                );
+
+            if (
+                authError ||
+                !token
+            ) {
+                console.error(
+                    `Failed to authorize with Discord Says for application ${applicationName}. Cannot complete the quest.`,
+                    authError
+                );
+
+                return;
+            }
+
+            const {
+                success,
+                error: progressError
+            } =
+                await Utils.progressDiscordSays(
+                    applicationId,
+                    quest.id,
+                    token,
+                    questTarget,
+                    activityReferrer
+                );
+
+            if (
+                progressError ||
+                !success
+            ) {
+                console.error(
+                    `Failed to progress quest with Discord Says for application ${applicationName}. Cannot complete the quest.`,
+                    progressError
+                );
+
+                return;
+            }
+
+            const tokens =
+                await this.client.rest.get(
+                    '/oauth2/tokens'
+                );
+
+            const tokenInfo =
+                tokens.find(
+                    (token) =>
+                        token.application?.id ===
+                        applicationId
+                );
+
+            if (tokenInfo) {
+                try {
+                    await this.client.rest.delete(
+                        `/oauth2/tokens/${tokenInfo.id}`
+                    );
+
+                    console.log(
+                        `Deauthorized application ${applicationName}`
+                    );
+                } catch (err) {
+                    console.error(
+                        `Failed to deauthorize token for application ${applicationName}.`,
+                        err.message
+                    );
+                }
+            }
+
+            console.log(
+                `${questName} Completed!`
+            );
+        } catch (error) {
+            console.error(
+                `Error during quest "${questName}":`,
+                error.message
+            );
+            throw error;
+        } finally {
+            this.clearAllTimers();
+        }
     }
 }
 

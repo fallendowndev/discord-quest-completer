@@ -406,9 +406,6 @@ class Utils {
 
     static async updateLatestBuildVersion() {
         try {
-            console.info(
-                'Fetching latest Discord build number (Desktop Version)...'
-            );
 
             const response =
                 await fetch(
@@ -486,10 +483,6 @@ class Utils {
                                 match[1],
                                 10
                             );
-
-                        console.log(
-                            `Build number: ${buildNumber}`
-                        );
 
                         Constants.Properties.client_build_number =
                             buildNumber;
